@@ -1,5 +1,6 @@
 # discourse-anonymous-post
 
+(This plugin is currently broken.)
 A Discourse plugin for posting as anonymous user via a button in composer, without the need to switch to anonymous mode.
 
 ## Current functionality and plan

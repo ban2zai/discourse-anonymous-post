@@ -202,7 +202,9 @@ after_initialize do
       return original_participants if anon_user_ids.empty?
 
       original_participants.map do |participant|
-        user_id = participant.respond_to?(:id) ? participant.id : nil
+        # participants are Hashes: {user: <User>, post_count: N}
+        user = participant.is_a?(Hash) ? participant[:user] : participant
+        user_id = user.respond_to?(:id) ? user.id : nil
 
         if user_id && anon_user_ids.include?(user_id)
           # Check if ALL posts by this user are anonymous
@@ -213,10 +215,13 @@ after_initialize do
             .count
 
           if total_posts == anon_posts
-            Rails.logger.warn("[ANON-POST] TopicViewDetailsSerializer: anonymizing participant #{user_id} in topic #{topic.id}")
-            obj = AnonymousPostHelper.anonymous_user_object
-            obj.post_count = participant.respond_to?(:post_count) ? participant.post_count : 1
-            obj
+            if participant.is_a?(Hash)
+              { user: AnonymousPostHelper.anonymous_user_object, post_count: participant[:post_count] }
+            else
+              obj = AnonymousPostHelper.anonymous_user_object
+              obj.post_count = user.respond_to?(:post_count) ? user.post_count : 1
+              obj
+            end
           else
             participant
           end

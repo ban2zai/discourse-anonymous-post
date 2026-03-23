@@ -17,6 +17,10 @@ after_initialize do
   register_post_custom_field_type("is_anonymous_post", :integer)
   register_topic_custom_field_type("is_anonymous_topic", :integer)
 
+  # Preload custom fields to avoid N+1 queries (HasCustomFields::NotPreloadedError)
+  Topic.preloaded_custom_fields << "is_anonymous_topic"
+  Post.preloaded_custom_fields << "is_anonymous_post" if Post.respond_to?(:preloaded_custom_fields)
+
   # --- Shared helper module ---
 
   module ::AnonymousPostHelper

@@ -1,9 +1,27 @@
-.anonymous-post-button {
-  margin-right: 10px;
+.anonymous-post-checkbox {
+  margin: 5px 0;
+
+  .checkbox-label {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    cursor: pointer;
+    font-size: var(--font-down-1);
+    color: var(--primary-medium);
+
+    input[type="checkbox"] {
+      margin: 0;
+    }
+
+    .d-icon {
+      font-size: var(--font-up-1);
+    }
+  }
 }
 
 .anonymous-post {
-  .topic-avatar, .topic-body {
+  .topic-avatar,
+  .topic-body {
     border-top: none;
   }
 }

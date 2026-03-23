@@ -1,3 +1,6 @@
 en:
   site_settings:
-    anonymous_post_enabled: Enable anonymous reply?
+    anonymous_post_enabled: "Enable anonymous posting?"
+  js:
+    anonymous_post:
+      anonymous_name: "Anonymous"

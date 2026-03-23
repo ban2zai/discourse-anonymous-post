@@ -34,6 +34,22 @@ after_initialize do
       }
     end
 
+    # Returns a serializer-compatible object (BasicUserSerializer needs read_attribute_for_serialization)
+    def self.anonymous_user_object
+      obj = OpenStruct.new(
+        id: -1,
+        username: "anonymous",
+        name: I18n.t("js.anonymous_post.anonymous_name"),
+        avatar_template: ANON_AVATAR,
+        primary_group_id: nil,
+        flair_group_id: nil,
+      )
+      def obj.read_attribute_for_serialization(attr)
+        send(attr)
+      end
+      obj
+    end
+
     def self.anon_post?(post_obj)
       post_obj.custom_fields["is_anonymous_post"].to_i == 1
     end
@@ -144,7 +160,7 @@ after_initialize do
       topic = object.topic
       if AnonymousPostHelper.anon_topic?(topic) && !scope.is_admin?
         Rails.logger.warn("[ANON-POST] TopicViewDetailsSerializer: anonymizing created_by for topic #{topic.id}")
-        AnonymousPostHelper.anonymous_user_hash
+        AnonymousPostHelper.anonymous_user_object
       else
         original_created_by
       end
@@ -168,7 +184,7 @@ after_initialize do
 
         if should_anonymize
           Rails.logger.warn("[ANON-POST] TopicViewDetailsSerializer: anonymizing last_poster for topic #{topic.id}")
-          return AnonymousPostHelper.anonymous_user_hash
+          return AnonymousPostHelper.anonymous_user_object
         end
       end
 
@@ -198,9 +214,9 @@ after_initialize do
 
           if total_posts == anon_posts
             Rails.logger.warn("[ANON-POST] TopicViewDetailsSerializer: anonymizing participant #{user_id} in topic #{topic.id}")
-            hash = AnonymousPostHelper.anonymous_user_hash
-            hash[:post_count] = participant.respond_to?(:post_count) ? participant.post_count : 1
-            hash
+            obj = AnonymousPostHelper.anonymous_user_object
+            obj.post_count = participant.respond_to?(:post_count) ? participant.post_count : 1
+            obj
           else
             participant
           end
@@ -222,12 +238,16 @@ after_initialize do
 
       original_posters.map do |poster|
         if poster.description&.include?("Original Poster")
-          OpenStruct.new(
-            user: OpenStruct.new(AnonymousPostHelper.anonymous_user_hash),
+          anon_poster = OpenStruct.new(
+            user: AnonymousPostHelper.anonymous_user_object,
             description: poster.description,
             extras: poster.extras,
             primary_group: nil,
           )
+          def anon_poster.read_attribute_for_serialization(attr)
+            send(attr)
+          end
+          anon_poster
         else
           poster
         end

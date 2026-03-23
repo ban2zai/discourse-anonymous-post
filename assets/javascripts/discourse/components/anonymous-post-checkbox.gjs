@@ -13,16 +13,20 @@ export default class AnonymousPostCheckbox extends Component {
 
   get shouldRender() {
     if (!this.siteSettings.anonymous_post_enabled) {
+      console.log("[ANON-POST] plugin disabled in site settings");
       return false;
     }
 
     const model = this.args.outletArgs?.model;
     if (!model) {
+      console.log("[ANON-POST] no model in outletArgs");
       return false;
     }
 
     const action = model.action;
-    return action === "reply" || action === "createTopic";
+    const result = action === "reply" || action === "createTopic";
+    console.log("[ANON-POST] shouldRender:", result, "action:", action);
+    return result;
   }
 
   @action
@@ -31,6 +35,7 @@ export default class AnonymousPostCheckbox extends Component {
     const model = this.args.outletArgs?.model;
     if (model) {
       model.set("is_anonymous_post", this.checked ? 1 : 0);
+      console.log("[ANON-POST] toggled:", this.checked, "model.is_anonymous_post:", model.get("is_anonymous_post"));
     }
   }
 

@@ -242,7 +242,7 @@ after_initialize do
       Rails.logger.warn("[ANON-POST] TopicListItemSerializer: anonymizing posters for topic #{topic.id}")
 
       original_posters.map do |poster|
-        if poster.description&.include?("Original Poster")
+        if poster.user&.id == topic.user_id
           anon_poster = OpenStruct.new(
             user: AnonymousPostHelper.anonymous_user_object,
             description: poster.description,

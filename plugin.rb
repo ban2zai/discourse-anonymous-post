@@ -38,6 +38,21 @@ after_initialize do
       post_obj.custom_fields["is_anonymous_post"].to_i == 1
     end
 
+    # Safe check via direct DB query — avoids NotPreloadedError
+    def self.anon_post_by_id?(post_id)
+      PostCustomField.exists?(post_id: post_id, name: "is_anonymous_post", value: "1")
+    end
+
+    # Get all user_ids that have anonymous posts in a given topic
+    def self.anon_user_ids_in_topic(topic_id)
+      PostCustomField
+        .where(name: "is_anonymous_post", value: "1")
+        .joins("INNER JOIN posts ON posts.id = post_custom_fields.post_id")
+        .where("posts.topic_id = ?", topic_id)
+        .pluck("posts.user_id")
+        .uniq
+    end
+
     def self.anon_topic?(topic_obj)
       topic_obj.custom_fields["is_anonymous_topic"].to_i == 1
     end
@@ -141,13 +156,15 @@ after_initialize do
       if !scope.is_admin?
         should_anonymize = false
 
+        # Check if topic is anonymous and last poster is the OP
         if AnonymousPostHelper.anon_topic?(topic)
-          last_poster_user = object.topic_last_poster
+          last_poster_user = topic.last_poster
           should_anonymize = true if last_poster_user&.id == topic.user_id
         end
 
-        last_post = topic.posts.order(post_number: :desc).first
-        should_anonymize = true if last_post && AnonymousPostHelper.anon_post?(last_post)
+        # Check if the last post itself is anonymous (via direct DB query)
+        last_post_id = topic.posts.order(post_number: :desc).limit(1).pluck(:id).first
+        should_anonymize = true if last_post_id && AnonymousPostHelper.anon_post_by_id?(last_post_id)
 
         if should_anonymize
           Rails.logger.warn("[ANON-POST] TopicViewDetailsSerializer: anonymizing last_poster for topic #{topic.id}")
@@ -163,18 +180,30 @@ after_initialize do
       topic = object.topic
       return original_participants if scope.is_admin?
 
+      # Get all user_ids with anonymous posts in this topic (single DB query)
+      anon_user_ids = AnonymousPostHelper.anon_user_ids_in_topic(topic.id)
+
+      return original_participants if anon_user_ids.empty?
+
       original_participants.map do |participant|
-        user_id = participant.respond_to?(:id) ? participant.id : participant[:id]
+        user_id = participant.respond_to?(:id) ? participant.id : nil
 
-        # Check if all posts by this user in this topic are anonymous
-        user_posts = topic.posts.where(user_id: user_id)
-        all_anonymous = user_posts.present? && user_posts.all? { |p| AnonymousPostHelper.anon_post?(p) }
+        if user_id && anon_user_ids.include?(user_id)
+          # Check if ALL posts by this user are anonymous
+          total_posts = topic.posts.where(user_id: user_id).count
+          anon_posts = PostCustomField.where(name: "is_anonymous_post", value: "1")
+            .joins("INNER JOIN posts ON posts.id = post_custom_fields.post_id")
+            .where("posts.topic_id = ? AND posts.user_id = ?", topic.id, user_id)
+            .count
 
-        if all_anonymous
-          Rails.logger.warn("[ANON-POST] TopicViewDetailsSerializer: anonymizing participant #{user_id} in topic #{topic.id}")
-          hash = AnonymousPostHelper.anonymous_user_hash
-          hash[:post_count] = participant.respond_to?(:post_count) ? participant.post_count : 1
-          hash
+          if total_posts == anon_posts
+            Rails.logger.warn("[ANON-POST] TopicViewDetailsSerializer: anonymizing participant #{user_id} in topic #{topic.id}")
+            hash = AnonymousPostHelper.anonymous_user_hash
+            hash[:post_count] = participant.respond_to?(:post_count) ? participant.post_count : 1
+            hash
+          else
+            participant
+          end
         else
           participant
         end
@@ -225,8 +254,7 @@ after_initialize do
         if guardian && !guardian.is_admin? && guardian.user&.id != acting_user_id
           result = result.reject do |action|
             if action.respond_to?(:post_id) && action.post_id.present?
-              post = Post.find_by(id: action.post_id)
-              post && AnonymousPostHelper.anon_post?(post)
+              AnonymousPostHelper.anon_post_by_id?(action.post_id)
             else
               false
             end

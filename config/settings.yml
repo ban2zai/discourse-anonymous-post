@@ -10,6 +10,9 @@ plugins:
     type: group_list
     default: "1"
     client: true
+  anonymous_post_ghost_color:
+    default: "#ffb900"
+    client: true
   anonymous_post_user:
     default: "anonymous"
     client: false

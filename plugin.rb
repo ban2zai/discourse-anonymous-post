@@ -184,6 +184,43 @@ after_initialize do
     end
   end
 
+  # --- PostSerializer: anonymize quoted usernames in cooked HTML ---
+
+  add_to_serializer(:post, :cooked) do
+    html = object.cooked
+    return html if html.blank?
+    return html if AnonymousPostHelper.can_reveal?(scope)
+
+    # Collect which usernames need anonymizing based on quoted post references
+    # Quote format: <aside class="quote" data-username="realuser" data-post="N" data-topic="T">
+    anon_name = AnonymousPostHelper.anon_username
+
+    html = html.gsub(%r{<aside[^>]*class="quote"[^>]*>.*?</aside>}m) do |quote_block|
+      # Extract data attributes
+      data_username = quote_block[/data-username="([^"]+)"/, 1]
+      data_post = quote_block[/data-post="(\d+)"/, 1]
+      data_topic = quote_block[/data-topic="(\d+)"/, 1]
+
+      next quote_block unless data_username && data_post && data_topic
+
+      quoted_post = Post.find_by(topic_id: data_topic.to_i, post_number: data_post.to_i)
+      if quoted_post && AnonymousPostHelper.anon_post_by_id?(quoted_post.id) &&
+         scope.user&.id != quoted_post.user_id
+        # Replace data-username attribute
+        result = quote_block.gsub(/data-username="[^"]+"/, "data-username=\"#{anon_name}\"")
+        # Replace visible username text after the avatar img in the title div
+        result = result.gsub(%r{(<div class="title">\s*<img[^>]*>\s*)#{Regexp.escape(data_username)}(\s*:?\s*</div>)}m) do
+          "#{$1}#{anon_name}#{$2}"
+        end
+        result
+      else
+        quote_block
+      end
+    end
+
+    html
+  end
+
   # --- PostSerializer: anonymize reply-to user for anonymous posts ---
 
   PostSerializer.class_eval do
@@ -320,25 +357,27 @@ after_initialize do
 
   # --- discourse-reactions: anonymize reaction users on anonymous posts ---
 
-  if defined?(DiscourseReactions::ReactionUserSerializer)
-    DiscourseReactions::ReactionUserSerializer.class_eval do
-      alias_method :original_username, :username
-      def username
-        post = @options[:post] || object.try(:post)
-        if post && AnonymousPostHelper.anon_post?(post) && !AnonymousPostHelper.can_reveal?(scope)
-          AnonymousPostHelper.anonymous_user&.username || AnonymousPostHelper.anon_username
-        else
-          original_username
-        end
-      end
+  if defined?(UserReactionSerializer)
+    UserReactionSerializer.class_eval do
+      alias_method :original_user, :user
+      def user
+        reaction_user = object.user
+        post = object.post
+        return reaction_user unless post
 
-      alias_method :original_avatar_template, :avatar_template
-      def avatar_template
-        post = @options[:post] || object.try(:post)
-        if post && AnonymousPostHelper.anon_post?(post) && !AnonymousPostHelper.can_reveal?(scope)
-          AnonymousPostHelper.anonymous_user&.avatar_template || AnonymousPostHelper::ANON_AVATAR_FALLBACK
+        topic = post.topic
+        return reaction_user unless topic
+        return reaction_user if AnonymousPostHelper.can_reveal?(scope)
+
+        # Anonymize if the reacting user is the topic owner in an anonymous topic
+        if AnonymousPostHelper.anon_topic?(topic) && reaction_user&.id == topic.user_id &&
+           scope.user&.id != reaction_user&.id
+          AnonymousPostHelper.anonymous_user_object
+        elsif AnonymousPostHelper.anon_post_by_id?(post.id) && reaction_user&.id == post.user_id &&
+              scope.user&.id != reaction_user&.id
+          AnonymousPostHelper.anonymous_user_object
         else
-          original_avatar_template
+          reaction_user
         end
       end
     end
@@ -412,44 +451,46 @@ after_initialize do
   end
 
   # --- discourse-solved: anonymize "Solved by" display ---
-  # Override accepted_answer_post_info on Topic to replace real user data
-  # with anonymous user data when the solver/accepter posted anonymously
+  # Override at serializer level to avoid load-order issues with Topic.prepend.
+  # Ruby MRO checks prepended modules before the class's own methods, so our
+  # prepend runs first even if discourse-solved defines accepted_answer via
+  # add_to_serializer (which uses define_method on the class).
 
-  if defined?(DiscourseSolved)
-    module ::AnonymousTopicSolvedExtension
-      def accepted_answer_post_info
-        result = super
-        return result unless result
+  module ::AnonymousSolvedSerializerExtension
+    def accepted_answer
+      result = super
+      return result unless result.is_a?(Hash)
+      return result if AnonymousPostHelper.can_reveal?(scope)
 
-        topic = self
+      topic = object.topic
+      return result unless AnonymousPostHelper.anon_topic?(topic)
 
-        # Anonymize solver (the person whose answer was accepted)
-        if result[:username].present?
-          answer_post = topic.solved&.answer_post
-          if answer_post && AnonymousPostHelper.anon_post_by_id?(answer_post.id)
-            anon = AnonymousPostHelper.anonymous_user
-            result[:username] = anon&.username || AnonymousPostHelper.anon_username
-            result[:name] = anon&.name || I18n.t("js.anonymous_post.anonymous_name")
-          end
+      # Anonymize solver if their answer post is anonymous
+      if result[:username].present?
+        answer_post = topic.solved&.answer_post rescue nil
+        if answer_post && AnonymousPostHelper.anon_post_by_id?(answer_post.id)
+          anon = AnonymousPostHelper.anonymous_user_hash
+          result = result.dup
+          result[:username] = anon[:username]
+          result[:name] = anon[:name]
         end
-
-        # Anonymize accepter (the person who marked the answer as solved)
-        if result[:accepter_username].present? && AnonymousPostHelper.anon_topic?(topic)
-          # If the accepter is the topic owner (anonymous), anonymize them
-          accepter = topic.solved&.accepter
-          if accepter&.id == topic.user_id
-            anon = AnonymousPostHelper.anonymous_user
-            result[:accepter_username] = anon&.username || AnonymousPostHelper.anon_username
-            result[:accepter_name] = anon&.name || I18n.t("js.anonymous_post.anonymous_name")
-          end
-        end
-
-        result
       end
-    end
 
-    Topic.prepend(AnonymousTopicSolvedExtension)
+      # Anonymize accepter if they are the topic owner
+      if result[:accepter_username].present?
+        accepter = topic.solved&.accepter rescue nil
+        if accepter&.id == topic.user_id
+          anon = AnonymousPostHelper.anonymous_user_hash
+          result[:accepter_username] = anon[:username]
+          result[:accepter_name] = anon[:name]
+        end
+      end
+
+      result
+    end
   end
+
+  TopicViewSerializer.prepend(AnonymousSolvedSerializerExtension)
 
   # --- UserSummary: hide anonymous posts/topics from profile summary ---
 

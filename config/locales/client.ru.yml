@@ -3,3 +3,4 @@ ru:
     anonymous_post:
       btn_label: "Анонимно"
       anonymous_name: "Аноним"
+      tooltip: "Пост размещен анонимно"

@@ -25,3 +25,12 @@
     border-top: none;
   }
 }
+
+.is-anonymous-post .anon-post-indicator {
+  margin-left: 5px;
+
+  .d-icon {
+    color: var(--tertiary);
+    font-size: var(--font-down-1);
+  }
+}

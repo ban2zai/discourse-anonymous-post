@@ -116,7 +116,7 @@ after_initialize do
   end
 
   add_to_serializer(:post, :username) do
-    if AnonymousPostHelper.anon_post?(object) && !scope.is_admin?
+    if AnonymousPostHelper.anon_post?(object) && !scope.is_admin? && scope.user&.id != object.user_id
       "anonymous"
     else
       object.user&.username
@@ -124,7 +124,7 @@ after_initialize do
   end
 
   add_to_serializer(:post, :display_username) do
-    if AnonymousPostHelper.anon_post?(object) && !scope.is_admin?
+    if AnonymousPostHelper.anon_post?(object) && !scope.is_admin? && scope.user&.id != object.user_id
       I18n.t("js.anonymous_post.anonymous_name")
     else
       object.user&.name
@@ -132,7 +132,7 @@ after_initialize do
   end
 
   add_to_serializer(:post, :name) do
-    if AnonymousPostHelper.anon_post?(object) && !scope.is_admin?
+    if AnonymousPostHelper.anon_post?(object) && !scope.is_admin? && scope.user&.id != object.user_id
       I18n.t("js.anonymous_post.anonymous_name")
     else
       object.user&.name
@@ -140,7 +140,7 @@ after_initialize do
   end
 
   add_to_serializer(:post, :avatar_template) do
-    if AnonymousPostHelper.anon_post?(object) && !scope.is_admin?
+    if AnonymousPostHelper.anon_post?(object) && !scope.is_admin? && scope.user&.id != object.user_id
       AnonymousPostHelper.anonymous_user&.avatar_template || AnonymousPostHelper::ANON_AVATAR_FALLBACK
     else
       object.user&.avatar_template
@@ -148,7 +148,7 @@ after_initialize do
   end
 
   add_to_serializer(:post, :user_id) do
-    if AnonymousPostHelper.anon_post?(object) && !scope.is_admin?
+    if AnonymousPostHelper.anon_post?(object) && !scope.is_admin? && scope.user&.id != object.user_id
       AnonymousPostHelper.anonymous_user&.id
     else
       object.user_id
@@ -305,6 +305,25 @@ after_initialize do
       end
     end
   end
+
+  # --- PostAlerter: anonymize notifications for anonymous posts ---
+
+  module ::AnonymousPostAlerterExtension
+    def create_notification(user, notification_type, post, opts = {})
+      if post && AnonymousPostHelper.anon_post?(post)
+        anon = AnonymousPostHelper.anonymous_user
+        if anon
+          opts[:display_username] = anon.username
+          opts[:acting_user_id] = anon.id
+        else
+          opts[:display_username] = "anonymous"
+        end
+      end
+      super(user, notification_type, post, opts)
+    end
+  end
+
+  PostAlerter.prepend(AnonymousPostAlerterExtension)
 
   # --- UserAction: hide anonymous posts from other users' activity ---
   # Filter at the stream level by patching UserAction.stream

@@ -20,13 +20,15 @@ export default apiInitializer("0.4.0", (api) => {
   });
 
   // Ghost icon left of topic title in topic list for anonymous topics
+  api.addTopicListItemClassCallback((topic) => {
+    return topic.is_anonymous_topic ? "is-anonymous-topic" : "";
+  });
+
   api.onPageChange(() => {
-    document.querySelectorAll("tr.topic-list-item[data-topic-id]").forEach((row) => {
-      if (row.querySelector(".anon-topic-icon")) return;
-      const topicId = parseInt(row.dataset.topicId, 10);
-      const store = api.container.lookup("service:store");
-      const topic = store.peekRecord("topic", topicId);
-      if (topic && topic.is_anonymous_topic) {
+    document
+      .querySelectorAll("tr.is-anonymous-topic[data-topic-id]")
+      .forEach((row) => {
+        if (row.querySelector(".anon-topic-icon")) return;
         const titleLink = row.querySelector(".link-top-line a.title");
         if (titleLink) {
           const icon = document.createElement("span");
@@ -34,7 +36,6 @@ export default apiInitializer("0.4.0", (api) => {
           icon.innerHTML = iconHTML("ghost");
           titleLink.parentElement.insertBefore(icon, titleLink);
         }
-      }
-    });
+      });
   });
 });

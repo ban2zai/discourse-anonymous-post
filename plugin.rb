@@ -192,7 +192,7 @@ after_initialize do
 
   add_to_serializer(:topic_view, :user_id) do
     topic = object.topic
-    if AnonymousPostHelper.anon_topic?(topic) && !AnonymousPostHelper.can_reveal?(scope)
+    if AnonymousPostHelper.anon_topic?(topic) && !AnonymousPostHelper.can_reveal?(scope) && scope.user&.id != topic.user_id
       nil
     else
       topic.user_id
@@ -466,7 +466,7 @@ after_initialize do
         guardian = opts[:guardian]
         acting_user_id = opts[:user_id]
 
-        if guardian && !guardian.is_admin? && guardian.user&.id != acting_user_id
+        if guardian && !AnonymousPostHelper.can_reveal?(guardian) && guardian.user&.id != acting_user_id
           result = result.reject do |action|
             if action.respond_to?(:post_id) && action.post_id.present?
               AnonymousPostHelper.anon_post_by_id?(action.post_id)
@@ -491,7 +491,9 @@ after_initialize do
       # If the viewer is not the profile owner and not in reveal groups, exclude anonymous topics
       if @guardian && !AnonymousPostHelper.can_reveal?(@guardian) && @guardian.user&.id != user.id
         anon_topic_ids = TopicCustomField.where(name: "is_anonymous_topic", value: "1").pluck(:topic_id)
-        result = result.where.not(id: anon_topic_ids) if anon_topic_ids.present?
+        if anon_topic_ids.present?
+          result.topics.reject! { |t| anon_topic_ids.include?(t.id) }
+        end
       end
       result
     end

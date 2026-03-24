@@ -2,8 +2,8 @@
 
 # name: discourse-anonymous-post
 # version: 0.4.0
-# authors: github.com/fokx
-# url: https://github.com/fokx/discourse-anonymous-post
+# authors: github.com/ban2zai
+# url: https://github.com/ban2zai/discourse-anonymous-post
 
 %i[common mobile].each do |layout|
   register_asset "stylesheets/anonymous-post/#{layout}.scss", layout

@@ -20,22 +20,23 @@ export default apiInitializer("0.4.0", (api) => {
   });
 
   // Ghost icon left of topic title in topic list for anonymous topics
-  api.addTopicListItemClassCallback((topic) => {
-    return topic.is_anonymous_topic ? "is-anonymous-topic" : "";
+  api.registerValueTransformer("topic-list-item-class", ({ value, context }) => {
+    if (context.topic.is_anonymous_topic) {
+      value.push("is-anonymous-topic");
+    }
+    return value;
   });
 
   api.onPageChange(() => {
-    document
-      .querySelectorAll("tr.is-anonymous-topic[data-topic-id]")
-      .forEach((row) => {
-        if (row.querySelector(".anon-topic-icon")) return;
-        const titleLink = row.querySelector(".link-top-line a.title");
-        if (titleLink) {
-          const icon = document.createElement("span");
-          icon.className = "anon-topic-icon";
-          icon.innerHTML = iconHTML("ghost");
-          titleLink.parentElement.insertBefore(icon, titleLink);
-        }
-      });
+    document.querySelectorAll("tr.is-anonymous-topic").forEach((row) => {
+      if (row.querySelector(".anon-topic-icon")) return;
+      const titleLink = row.querySelector(".link-top-line a.title");
+      if (titleLink) {
+        const icon = document.createElement("span");
+        icon.className = "anon-topic-icon";
+        icon.innerHTML = iconHTML("ghost");
+        titleLink.parentElement.insertBefore(icon, titleLink);
+      }
+    });
   });
 });

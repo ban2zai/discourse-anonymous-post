@@ -138,46 +138,64 @@ after_initialize do
     end
   end
 
-  # --- PostSerializer overrides ---
+  # --- BasicPostSerializer: anonymize user fields across ALL post serializers ---
+  # Covers PostSerializer, SearchPostSerializer, PostWordpressSerializer
+
+  BasicPostSerializer.class_eval do
+    alias_method :original_basic_username, :username
+    def username
+      if AnonymousPostHelper.anon_post_by_id?(object.id) &&
+         !AnonymousPostHelper.can_reveal?(scope) &&
+         scope.user&.id != object.user_id
+        AnonymousPostHelper.anon_username
+      else
+        original_basic_username
+      end
+    end
+
+    alias_method :original_basic_name, :name
+    def name
+      if AnonymousPostHelper.anon_post_by_id?(object.id) &&
+         !AnonymousPostHelper.can_reveal?(scope) &&
+         scope.user&.id != object.user_id
+        I18n.t("js.anonymous_post.anonymous_name")
+      else
+        original_basic_name
+      end
+    end
+
+    alias_method :original_basic_avatar_template, :avatar_template
+    def avatar_template
+      if AnonymousPostHelper.anon_post_by_id?(object.id) &&
+         !AnonymousPostHelper.can_reveal?(scope) &&
+         scope.user&.id != object.user_id
+        AnonymousPostHelper.anonymous_user&.avatar_template || AnonymousPostHelper::ANON_AVATAR_FALLBACK
+      else
+        original_basic_avatar_template
+      end
+    end
+  end
+
+  # --- PostSerializer-specific overrides ---
 
   add_to_serializer(:post, :is_anonymous_post) do
     object.custom_fields["is_anonymous_post"].to_i
   end
 
-  add_to_serializer(:post, :username) do
-    if AnonymousPostHelper.anon_post?(object) && !AnonymousPostHelper.can_reveal?(scope) && scope.user&.id != object.user_id
-      AnonymousPostHelper.anon_username
-    else
-      object.user&.username
-    end
-  end
-
   add_to_serializer(:post, :display_username) do
-    if AnonymousPostHelper.anon_post?(object) && !AnonymousPostHelper.can_reveal?(scope) && scope.user&.id != object.user_id
+    if AnonymousPostHelper.anon_post_by_id?(object.id) &&
+       !AnonymousPostHelper.can_reveal?(scope) &&
+       scope.user&.id != object.user_id
       I18n.t("js.anonymous_post.anonymous_name")
     else
       object.user&.name
-    end
-  end
-
-  add_to_serializer(:post, :name) do
-    if AnonymousPostHelper.anon_post?(object) && !AnonymousPostHelper.can_reveal?(scope) && scope.user&.id != object.user_id
-      I18n.t("js.anonymous_post.anonymous_name")
-    else
-      object.user&.name
-    end
-  end
-
-  add_to_serializer(:post, :avatar_template) do
-    if AnonymousPostHelper.anon_post?(object) && !AnonymousPostHelper.can_reveal?(scope) && scope.user&.id != object.user_id
-      AnonymousPostHelper.anonymous_user&.avatar_template || AnonymousPostHelper::ANON_AVATAR_FALLBACK
-    else
-      object.user&.avatar_template
     end
   end
 
   add_to_serializer(:post, :user_id) do
-    if AnonymousPostHelper.anon_post?(object) && !AnonymousPostHelper.can_reveal?(scope) && scope.user&.id != object.user_id
+    if AnonymousPostHelper.anon_post_by_id?(object.id) &&
+       !AnonymousPostHelper.can_reveal?(scope) &&
+       scope.user&.id != object.user_id
       AnonymousPostHelper.anonymous_user&.id
     else
       object.user_id

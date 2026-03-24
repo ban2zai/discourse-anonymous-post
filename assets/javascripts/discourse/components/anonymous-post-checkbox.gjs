@@ -24,23 +24,39 @@ export default class AnonymousPostCheckbox extends Component {
     }
 
     const modelAction = model.action;
-    const result = modelAction === "reply" || modelAction === "createTopic";
 
-    // Auto-check when replying in own anonymous topic
-    if (result && modelAction === "reply" && !this._initialized) {
+    if (modelAction === "createTopic") {
+      const allowedCategories =
+        this.siteSettings.anonymous_post_allowed_categories;
+      if (!allowedCategories) {
+        return false;
+      }
+      const categoryId = model.categoryId;
+      if (!categoryId) {
+        return false;
+      }
+      const allowed = allowedCategories.split("|").map(Number);
+      return allowed.includes(categoryId);
+    }
+
+    if (modelAction === "reply") {
       const topic = model.topic;
-      if (
-        topic?.is_anonymous_topic &&
-        this.currentUser &&
-        topic.user_id === this.currentUser.id
-      ) {
+      if (!topic?.is_anonymous_topic) {
+        return false;
+      }
+      if (!this.currentUser || topic.user_id !== this.currentUser.id) {
+        return false;
+      }
+
+      if (!this._initialized) {
         this._initialized = true;
         this.checked = true;
         model.set("is_anonymous_post", 1);
       }
+      return true;
     }
 
-    return result;
+    return false;
   }
 
   @action

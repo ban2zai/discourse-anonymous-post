@@ -1,7 +1,7 @@
 # frozen_string_literal: true
 
 # name: discourse-anonymous-post
-# version: 0.3.0
+# version: 0.4.0
 # authors: github.com/fokx
 # url: https://github.com/fokx/discourse-anonymous-post
 
@@ -23,15 +23,25 @@ after_initialize do
   # --- Shared helper module ---
 
   module ::AnonymousPostHelper
-    ANON_USERNAME = "anonymous"
     ANON_AVATAR_FALLBACK = "/letter_avatar_proxy/v4/letter/a/b3b5b3/{size}.png"
 
+    def self.anon_username
+      SiteSetting.anonymous_post_user.presence || "anonymous"
+    end
+
     def self.anonymous_user
-      @anonymous_user ||= User.find_by(username: ANON_USERNAME)
+      @anon_cached_username ||= nil
+      current = anon_username
+      if @anon_cached_username != current
+        @anonymous_user = User.find_by(username: current)
+        @anon_cached_username = current
+      end
+      @anonymous_user
     end
 
     def self.reset_cache!
       @anonymous_user = nil
+      @anon_cached_username = nil
     end
 
     def self.anonymous_user_hash
@@ -46,7 +56,7 @@ after_initialize do
       else
         {
           id: -1,
-          username: ANON_USERNAME,
+          username: anon_username,
           name: I18n.t("js.anonymous_post.anonymous_name"),
           avatar_template: ANON_AVATAR_FALLBACK,
         }
@@ -79,18 +89,24 @@ after_initialize do
       PostCustomField.exists?(post_id: post_id, name: "is_anonymous_post", value: "1")
     end
 
-    # Get all user_ids that have anonymous posts in a given topic
-    def self.anon_user_ids_in_topic(topic_id)
-      PostCustomField
-        .where(name: "is_anonymous_post", value: "1")
-        .joins("INNER JOIN posts ON posts.id = post_custom_fields.post_id")
-        .where("posts.topic_id = ?", topic_id)
-        .pluck("posts.user_id")
-        .uniq
-    end
-
     def self.anon_topic?(topic_obj)
       topic_obj.custom_fields["is_anonymous_topic"].to_i == 1
+    end
+
+    # Check if the current user can see real authors of anonymous posts
+    def self.can_reveal?(scope)
+      return true if scope.is_admin?
+      return false unless scope.user
+      allowed = SiteSetting.anonymous_post_reveal_groups
+      return false if allowed.blank?
+      group_ids = allowed.split("|").map(&:to_i)
+      scope.user.groups.where(id: group_ids).exists?
+    end
+
+    # Check if category allows anonymous posting
+    def self.category_allowed?(category_id)
+      cat_ids = SiteSetting.anonymous_post_allowed_categories.to_s.split("|").map(&:to_i)
+      cat_ids.present? && cat_ids.include?(category_id)
     end
   end
 
@@ -99,12 +115,25 @@ after_initialize do
   on(:post_created) do |post, opts|
     value = opts[:is_anonymous_post].to_i
     if value.positive?
-      post.custom_fields["is_anonymous_post"] = value
-      post.save_custom_fields(true)
+      topic = post.topic
+      allowed = false
 
       if post.post_number == 1
-        post.topic.custom_fields["is_anonymous_topic"] = 1
-        post.topic.save_custom_fields(true)
+        # New topic — check category whitelist (empty = disabled)
+        allowed = AnonymousPostHelper.category_allowed?(topic.category_id)
+      else
+        # Reply — only topic owner in their own anonymous topic
+        allowed = AnonymousPostHelper.anon_topic?(topic) && post.user_id == topic.user_id
+      end
+
+      if allowed
+        post.custom_fields["is_anonymous_post"] = value
+        post.save_custom_fields(true)
+
+        if post.post_number == 1
+          topic.custom_fields["is_anonymous_topic"] = 1
+          topic.save_custom_fields(true)
+        end
       end
     end
   end
@@ -116,15 +145,15 @@ after_initialize do
   end
 
   add_to_serializer(:post, :username) do
-    if AnonymousPostHelper.anon_post?(object) && !scope.is_admin? && scope.user&.id != object.user_id
-      "anonymous"
+    if AnonymousPostHelper.anon_post?(object) && !AnonymousPostHelper.can_reveal?(scope) && scope.user&.id != object.user_id
+      AnonymousPostHelper.anon_username
     else
       object.user&.username
     end
   end
 
   add_to_serializer(:post, :display_username) do
-    if AnonymousPostHelper.anon_post?(object) && !scope.is_admin? && scope.user&.id != object.user_id
+    if AnonymousPostHelper.anon_post?(object) && !AnonymousPostHelper.can_reveal?(scope) && scope.user&.id != object.user_id
       I18n.t("js.anonymous_post.anonymous_name")
     else
       object.user&.name
@@ -132,7 +161,7 @@ after_initialize do
   end
 
   add_to_serializer(:post, :name) do
-    if AnonymousPostHelper.anon_post?(object) && !scope.is_admin? && scope.user&.id != object.user_id
+    if AnonymousPostHelper.anon_post?(object) && !AnonymousPostHelper.can_reveal?(scope) && scope.user&.id != object.user_id
       I18n.t("js.anonymous_post.anonymous_name")
     else
       object.user&.name
@@ -140,7 +169,7 @@ after_initialize do
   end
 
   add_to_serializer(:post, :avatar_template) do
-    if AnonymousPostHelper.anon_post?(object) && !scope.is_admin? && scope.user&.id != object.user_id
+    if AnonymousPostHelper.anon_post?(object) && !AnonymousPostHelper.can_reveal?(scope) && scope.user&.id != object.user_id
       AnonymousPostHelper.anonymous_user&.avatar_template || AnonymousPostHelper::ANON_AVATAR_FALLBACK
     else
       object.user&.avatar_template
@@ -148,7 +177,7 @@ after_initialize do
   end
 
   add_to_serializer(:post, :user_id) do
-    if AnonymousPostHelper.anon_post?(object) && !scope.is_admin? && scope.user&.id != object.user_id
+    if AnonymousPostHelper.anon_post?(object) && !AnonymousPostHelper.can_reveal?(scope) && scope.user&.id != object.user_id
       AnonymousPostHelper.anonymous_user&.id
     else
       object.user_id
@@ -163,7 +192,7 @@ after_initialize do
 
   add_to_serializer(:topic_view, :user_id) do
     topic = object.topic
-    if AnonymousPostHelper.anon_topic?(topic) && !scope.is_admin?
+    if AnonymousPostHelper.anon_topic?(topic) && !AnonymousPostHelper.can_reveal?(scope)
       nil
     else
       topic.user_id
@@ -171,14 +200,12 @@ after_initialize do
   end
 
   # --- TopicViewDetailsSerializer: created_by, last_poster, participants ---
-  # Cannot use add_to_serializer(:topic_view_details, ...) — produces invalid constant name.
-  # Use class_eval instead.
 
   TopicViewDetailsSerializer.class_eval do
     alias_method :original_created_by, :created_by
     def created_by
       topic = object.topic
-      if AnonymousPostHelper.anon_topic?(topic) && !scope.is_admin?
+      if AnonymousPostHelper.anon_topic?(topic) && !AnonymousPostHelper.can_reveal?(scope)
         AnonymousPostHelper.anonymous_user_object
       else
         original_created_by
@@ -188,16 +215,14 @@ after_initialize do
     alias_method :original_last_poster, :last_poster
     def last_poster
       topic = object.topic
-      if !scope.is_admin?
+      if !AnonymousPostHelper.can_reveal?(scope)
         should_anonymize = false
 
-        # Check if topic is anonymous and last poster is the OP
         if AnonymousPostHelper.anon_topic?(topic)
           last_poster_user = topic.last_poster
           should_anonymize = true if last_poster_user&.id == topic.user_id
         end
 
-        # Check if the last post itself is anonymous (via direct DB query)
         last_post_id = topic.posts.order(post_number: :desc).limit(1).pluck(:id).first
         should_anonymize = true if last_post_id && AnonymousPostHelper.anon_post_by_id?(last_post_id)
 
@@ -212,36 +237,23 @@ after_initialize do
     alias_method :original_participants, :participants
     def participants
       topic = object.topic
-      return original_participants if scope.is_admin?
+      return original_participants if AnonymousPostHelper.can_reveal?(scope)
+      return original_participants unless AnonymousPostHelper.anon_topic?(topic)
 
-      # Get all user_ids with anonymous posts in this topic (single DB query)
-      anon_user_ids = AnonymousPostHelper.anon_user_ids_in_topic(topic.id)
-
-      return original_participants if anon_user_ids.empty?
+      # Since only topic creator can be anonymous, just anonymize their entry
+      topic_owner_id = topic.user_id
 
       original_participants.map do |participant|
-        # participants are Hashes: {user: <User>, post_count: N}
         user = participant.is_a?(Hash) ? participant[:user] : participant
         user_id = user.respond_to?(:id) ? user.id : nil
 
-        if user_id && anon_user_ids.include?(user_id)
-          # Check if ALL posts by this user are anonymous
-          total_posts = topic.posts.where(user_id: user_id).count
-          anon_posts = PostCustomField.where(name: "is_anonymous_post", value: "1")
-            .joins("INNER JOIN posts ON posts.id = post_custom_fields.post_id")
-            .where("posts.topic_id = ? AND posts.user_id = ?", topic.id, user_id)
-            .count
-
-          if total_posts == anon_posts
-            if participant.is_a?(Hash)
-              { user: AnonymousPostHelper.anonymous_user_object, post_count: participant[:post_count] }
-            else
-              obj = AnonymousPostHelper.anonymous_user_object
-              obj.post_count = user.respond_to?(:post_count) ? user.post_count : 1
-              obj
-            end
+        if user_id == topic_owner_id
+          if participant.is_a?(Hash)
+            { user: AnonymousPostHelper.anonymous_user_object, post_count: participant[:post_count] }
           else
-            participant
+            obj = AnonymousPostHelper.anonymous_user_object
+            obj.post_count = user.respond_to?(:post_count) ? user.post_count : 1
+            obj
           end
         else
           participant
@@ -256,13 +268,13 @@ after_initialize do
     topic = object
     original_posters = topic.posters || []
 
-    return original_posters if scope.is_admin?
+    return original_posters if AnonymousPostHelper.can_reveal?(scope)
+    return original_posters unless AnonymousPostHelper.anon_topic?(topic)
 
-    anon_user_ids = AnonymousPostHelper.anon_user_ids_in_topic(topic.id)
-    return original_posters if anon_user_ids.empty?
+    topic_owner_id = topic.user_id
 
     original_posters.map do |poster|
-      if poster.user && anon_user_ids.include?(poster.user.id) && scope.user&.id != poster.user.id
+      if poster.user && poster.user.id == topic_owner_id && scope.user&.id != poster.user.id
         anon_poster = OpenStruct.new(
           user: AnonymousPostHelper.anonymous_user_object,
           description: poster.description,
@@ -286,8 +298,8 @@ after_initialize do
       alias_method :original_username, :username
       def username
         post = @options[:post] || object.try(:post)
-        if post && AnonymousPostHelper.anon_post?(post) && !scope.is_admin?
-          AnonymousPostHelper.anonymous_user&.username || "anonymous"
+        if post && AnonymousPostHelper.anon_post?(post) && !AnonymousPostHelper.can_reveal?(scope)
+          AnonymousPostHelper.anonymous_user&.username || AnonymousPostHelper.anon_username
         else
           original_username
         end
@@ -296,7 +308,7 @@ after_initialize do
       alias_method :original_avatar_template, :avatar_template
       def avatar_template
         post = @options[:post] || object.try(:post)
-        if post && AnonymousPostHelper.anon_post?(post) && !scope.is_admin?
+        if post && AnonymousPostHelper.anon_post?(post) && !AnonymousPostHelper.can_reveal?(scope)
           AnonymousPostHelper.anonymous_user&.avatar_template || AnonymousPostHelper::ANON_AVATAR_FALLBACK
         else
           original_avatar_template
@@ -310,8 +322,8 @@ after_initialize do
   PostRevisionSerializer.class_eval do
     alias_method :original_username, :username
     def username
-      if AnonymousPostHelper.anon_post_by_id?(object.post_id) && !scope.is_admin?
-        AnonymousPostHelper.anonymous_user&.username || "anonymous"
+      if AnonymousPostHelper.anon_post_by_id?(object.post_id) && !AnonymousPostHelper.can_reveal?(scope)
+        AnonymousPostHelper.anonymous_user&.username || AnonymousPostHelper.anon_username
       else
         original_username
       end
@@ -319,7 +331,7 @@ after_initialize do
 
     alias_method :original_display_username, :display_username
     def display_username
-      if AnonymousPostHelper.anon_post_by_id?(object.post_id) && !scope.is_admin?
+      if AnonymousPostHelper.anon_post_by_id?(object.post_id) && !AnonymousPostHelper.can_reveal?(scope)
         AnonymousPostHelper.anonymous_user&.name || I18n.t("js.anonymous_post.anonymous_name")
       else
         original_display_username
@@ -328,7 +340,7 @@ after_initialize do
 
     alias_method :original_avatar_template, :avatar_template
     def avatar_template
-      if AnonymousPostHelper.anon_post_by_id?(object.post_id) && !scope.is_admin?
+      if AnonymousPostHelper.anon_post_by_id?(object.post_id) && !AnonymousPostHelper.can_reveal?(scope)
         AnonymousPostHelper.anonymous_user&.avatar_template || AnonymousPostHelper::ANON_AVATAR_FALLBACK
       else
         original_avatar_template
@@ -346,7 +358,7 @@ after_initialize do
           opts[:display_username] = anon.username
           opts[:acting_user_id] = anon.id
         else
-          opts[:display_username] = "anonymous"
+          opts[:display_username] = AnonymousPostHelper.anon_username
         end
       end
       super(user, notification_type, post, opts)
@@ -360,17 +372,56 @@ after_initialize do
   on(:accepted_solution) do |post|
     if post && AnonymousPostHelper.anon_post_by_id?(post.id)
       anon = AnonymousPostHelper.anonymous_user
-      # Fix notifications created in the last minute for this post
       Notification.where(
         topic_id: post.topic_id,
         post_number: post.post_number,
       ).where("created_at > ?", 1.minute.ago).each do |n|
         data = JSON.parse(n.data)
-        data["display_username"] = anon&.username || "anonymous"
-        data["username"] = anon&.username || "anonymous"
+        data["display_username"] = anon&.username || AnonymousPostHelper.anon_username
+        data["username"] = anon&.username || AnonymousPostHelper.anon_username
         n.update(data: data.to_json)
       end
     end
+  end
+
+  # --- discourse-solved: anonymize "Solved by" display ---
+  # Override accepted_answer_post_info on Topic to replace real user data
+  # with anonymous user data when the solver/accepter posted anonymously
+
+  if defined?(DiscourseSolved)
+    module ::AnonymousTopicSolvedExtension
+      def accepted_answer_post_info
+        result = super
+        return result unless result
+
+        topic = self
+
+        # Anonymize solver (the person whose answer was accepted)
+        if result[:username].present?
+          answer_post = topic.solved&.answer_post
+          if answer_post && AnonymousPostHelper.anon_post_by_id?(answer_post.id)
+            anon = AnonymousPostHelper.anonymous_user
+            result[:username] = anon&.username || AnonymousPostHelper.anon_username
+            result[:name] = anon&.name || I18n.t("js.anonymous_post.anonymous_name")
+          end
+        end
+
+        # Anonymize accepter (the person who marked the answer as solved)
+        if result[:accepter_username].present? && AnonymousPostHelper.anon_topic?(topic)
+          # If the accepter is the topic owner (anonymous), anonymize them
+          accepter = topic.solved&.accepter
+          if accepter&.id == topic.user_id
+            anon = AnonymousPostHelper.anonymous_user
+            result[:accepter_username] = anon&.username || AnonymousPostHelper.anon_username
+            result[:accepter_name] = anon&.name || I18n.t("js.anonymous_post.anonymous_name")
+          end
+        end
+
+        result
+      end
+    end
+
+    Topic.prepend(AnonymousTopicSolvedExtension)
   end
 
   # --- UserSummary: hide anonymous posts/topics from profile summary ---
@@ -404,7 +455,6 @@ after_initialize do
   UserSummary.prepend(AnonymousUserSummaryExtension)
 
   # --- UserAction: hide anonymous posts from other users' activity ---
-  # Filter at the stream level by patching UserAction.stream
 
   UserAction.class_eval do
     class << self
@@ -413,7 +463,6 @@ after_initialize do
       def stream(opts = {})
         result = original_stream(opts)
 
-        # If viewing someone else's activity (not self, not admin)
         guardian = opts[:guardian]
         acting_user_id = opts[:user_id]
 
@@ -421,6 +470,8 @@ after_initialize do
           result = result.reject do |action|
             if action.respond_to?(:post_id) && action.post_id.present?
               AnonymousPostHelper.anon_post_by_id?(action.post_id)
+            elsif action.respond_to?(:topic_id) && action.topic_id.present?
+              TopicCustomField.exists?(topic_id: action.topic_id, name: "is_anonymous_topic", value: "1")
             else
               false
             end
@@ -430,5 +481,77 @@ after_initialize do
         result
       end
     end
+  end
+
+  # --- TopicQuery: hide anonymous topics from "Темы" tab on user profile ---
+
+  module ::AnonymousTopicQueryExtension
+    def list_topics_by(user)
+      result = super(user)
+      # If the viewer is not the profile owner and not in reveal groups, exclude anonymous topics
+      if @guardian && !AnonymousPostHelper.can_reveal?(@guardian) && @guardian.user&.id != user.id
+        anon_topic_ids = TopicCustomField.where(name: "is_anonymous_topic", value: "1").pluck(:topic_id)
+        result = result.where.not(id: anon_topic_ids) if anon_topic_ids.present?
+      end
+      result
+    end
+  end
+
+  TopicQuery.prepend(AnonymousTopicQueryExtension)
+
+  # --- discourse-solved: hide anonymous solved posts from "Решённые" tab ---
+
+  if defined?(DiscourseSolved::SolvedTopicsController)
+    module ::AnonymousSolvedTopicsExtension
+      def by_user
+        params.require(:username)
+        target_user = User.find_by(username: params[:username])
+
+        # If viewing someone else's profile and not in reveal groups, filter anonymous posts
+        if target_user && current_user&.id != target_user.id &&
+           !AnonymousPostHelper.can_reveal?(guardian)
+          anon_post_ids = PostCustomField.where(name: "is_anonymous_post", value: "1").pluck(:post_id)
+          if anon_post_ids.present?
+            # Re-implement the query with additional filter
+            user =
+              fetch_user_from_params(
+                include_inactive:
+                  current_user.try(:staff?) || (current_user && SiteSetting.show_inactive_accounts),
+              )
+            raise Discourse::NotFound unless guardian.public_can_see_profiles?
+            raise Discourse::NotFound unless guardian.can_see_profile?(user)
+
+            offset = [0, params[:offset].to_i].max
+            limit = params.fetch(:limit, 30).to_i
+
+            posts =
+              Post
+                .joins(
+                  "INNER JOIN discourse_solved_solved_topics ON discourse_solved_solved_topics.answer_post_id = posts.id",
+                )
+                .joins(:topic)
+                .joins("LEFT JOIN categories ON categories.id = topics.category_id")
+                .where(user_id: user.id, deleted_at: nil)
+                .where(topics: { archetype: Archetype.default, deleted_at: nil })
+                .where(
+                  "topics.category_id IS NULL OR NOT categories.read_restricted OR topics.category_id IN (:secure_category_ids)",
+                  secure_category_ids: guardian.secure_category_ids,
+                )
+                .where.not(id: anon_post_ids)
+                .includes(:user, topic: %i[category tags])
+                .order("discourse_solved_solved_topics.created_at DESC")
+                .offset(offset)
+                .limit(limit)
+
+            render_serialized(posts, DiscourseSolved::SolvedPostSerializer, root: "user_solved_posts")
+            return
+          end
+        end
+
+        super
+      end
+    end
+
+    DiscourseSolved::SolvedTopicsController.prepend(AnonymousSolvedTopicsExtension)
   end
 end

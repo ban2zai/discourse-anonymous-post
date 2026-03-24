@@ -23,24 +23,44 @@ after_initialize do
   # --- Shared helper module ---
 
   module ::AnonymousPostHelper
-    ANON_AVATAR = "/letter_avatar_proxy/v4/letter/a/b3b5b3/{size}.png"
+    ANON_USERNAME = "anonymous"
+    ANON_AVATAR_FALLBACK = "/letter_avatar_proxy/v4/letter/a/b3b5b3/{size}.png"
+
+    def self.anonymous_user
+      @anonymous_user ||= User.find_by(username: ANON_USERNAME)
+    end
+
+    def self.reset_cache!
+      @anonymous_user = nil
+    end
 
     def self.anonymous_user_hash
-      {
-        id: -1,
-        username: "anonymous",
-        name: I18n.t("js.anonymous_post.anonymous_name"),
-        avatar_template: ANON_AVATAR,
-      }
+      user = anonymous_user
+      if user
+        {
+          id: user.id,
+          username: user.username,
+          name: user.name || I18n.t("js.anonymous_post.anonymous_name"),
+          avatar_template: user.avatar_template,
+        }
+      else
+        {
+          id: -1,
+          username: ANON_USERNAME,
+          name: I18n.t("js.anonymous_post.anonymous_name"),
+          avatar_template: ANON_AVATAR_FALLBACK,
+        }
+      end
     end
 
     # Returns a serializer-compatible object (BasicUserSerializer needs read_attribute_for_serialization)
     def self.anonymous_user_object
+      data = anonymous_user_hash
       obj = OpenStruct.new(
-        id: -1,
-        username: "anonymous",
-        name: I18n.t("js.anonymous_post.anonymous_name"),
-        avatar_template: ANON_AVATAR,
+        id: data[:id],
+        username: data[:username],
+        name: data[:name],
+        avatar_template: data[:avatar_template],
         primary_group_id: nil,
         flair_group_id: nil,
       )
@@ -79,15 +99,12 @@ after_initialize do
   on(:post_created) do |post, opts|
     value = opts[:is_anonymous_post].to_i
     if value.positive?
-      Rails.logger.warn("[ANON-POST] post_created: post_id=#{post.id}, post_number=#{post.post_number}, is_anonymous_post=#{value}")
-
       post.custom_fields["is_anonymous_post"] = value
       post.save_custom_fields(true)
 
       if post.post_number == 1
         post.topic.custom_fields["is_anonymous_topic"] = 1
         post.topic.save_custom_fields(true)
-        Rails.logger.warn("[ANON-POST] topic #{post.topic.id} marked as anonymous")
       end
     end
   end
@@ -124,7 +141,7 @@ after_initialize do
 
   add_to_serializer(:post, :avatar_template) do
     if AnonymousPostHelper.anon_post?(object) && !scope.is_admin?
-      AnonymousPostHelper::ANON_AVATAR
+      AnonymousPostHelper.anonymous_user&.avatar_template || AnonymousPostHelper::ANON_AVATAR_FALLBACK
     else
       object.user&.avatar_template
     end
@@ -132,7 +149,7 @@ after_initialize do
 
   add_to_serializer(:post, :user_id) do
     if AnonymousPostHelper.anon_post?(object) && !scope.is_admin?
-      nil
+      AnonymousPostHelper.anonymous_user&.id
     else
       object.user_id
     end
@@ -143,7 +160,6 @@ after_initialize do
   add_to_serializer(:topic_view, :user_id) do
     topic = object.topic
     if AnonymousPostHelper.anon_topic?(topic) && !scope.is_admin?
-      Rails.logger.warn("[ANON-POST] TopicViewSerializer: hiding user_id for topic #{topic.id}")
       nil
     else
       topic.user_id
@@ -159,7 +175,6 @@ after_initialize do
     def created_by
       topic = object.topic
       if AnonymousPostHelper.anon_topic?(topic) && !scope.is_admin?
-        Rails.logger.warn("[ANON-POST] TopicViewDetailsSerializer: anonymizing created_by for topic #{topic.id}")
         AnonymousPostHelper.anonymous_user_object
       else
         original_created_by
@@ -183,7 +198,6 @@ after_initialize do
         should_anonymize = true if last_post_id && AnonymousPostHelper.anon_post_by_id?(last_post_id)
 
         if should_anonymize
-          Rails.logger.warn("[ANON-POST] TopicViewDetailsSerializer: anonymizing last_poster for topic #{topic.id}")
           return AnonymousPostHelper.anonymous_user_object
         end
       end
@@ -238,27 +252,57 @@ after_initialize do
     topic = object
     original_posters = topic.posters || []
 
-    if AnonymousPostHelper.anon_topic?(topic) && !scope.is_admin?
-      Rails.logger.warn("[ANON-POST] TopicListItemSerializer: anonymizing posters for topic #{topic.id}")
+    return original_posters if scope.is_admin?
 
-      original_posters.map do |poster|
-        if poster.user&.id == topic.user_id
-          anon_poster = OpenStruct.new(
-            user: AnonymousPostHelper.anonymous_user_object,
-            description: poster.description,
-            extras: poster.extras,
-            primary_group: nil,
-          )
-          def anon_poster.read_attribute_for_serialization(attr)
-            send(attr)
-          end
-          anon_poster
-        else
-          poster
+    anon_user_ids = AnonymousPostHelper.anon_user_ids_in_topic(topic.id)
+    return original_posters if anon_user_ids.empty?
+
+    original_posters.map do |poster|
+      if poster.user && anon_user_ids.include?(poster.user.id)
+        anon_poster = OpenStruct.new(
+          user: AnonymousPostHelper.anonymous_user_object,
+          description: poster.description,
+          extras: poster.extras,
+          primary_group: nil,
+        )
+        def anon_poster.read_attribute_for_serialization(attr)
+          send(attr)
         end
+        anon_poster
+      else
+        poster
       end
-    else
-      original_posters
+    end
+  end
+
+  # --- PostRevisionSerializer: hide real editor for anonymous posts ---
+
+  PostRevisionSerializer.class_eval do
+    alias_method :original_username, :username
+    def username
+      if AnonymousPostHelper.anon_post_by_id?(object.post_id) && !scope.is_admin?
+        AnonymousPostHelper.anonymous_user&.username || "anonymous"
+      else
+        original_username
+      end
+    end
+
+    alias_method :original_display_username, :display_username
+    def display_username
+      if AnonymousPostHelper.anon_post_by_id?(object.post_id) && !scope.is_admin?
+        AnonymousPostHelper.anonymous_user&.name || I18n.t("js.anonymous_post.anonymous_name")
+      else
+        original_display_username
+      end
+    end
+
+    alias_method :original_avatar_template, :avatar_template
+    def avatar_template
+      if AnonymousPostHelper.anon_post_by_id?(object.post_id) && !scope.is_admin?
+        AnonymousPostHelper.anonymous_user&.avatar_template || AnonymousPostHelper::ANON_AVATAR_FALLBACK
+      else
+        original_avatar_template
+      end
     end
   end
 

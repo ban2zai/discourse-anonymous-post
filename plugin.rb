@@ -373,23 +373,21 @@ after_initialize do
     end
   end
 
-  # --- UserSummarySerializer: hide anonymous posts from profile summary ---
+  # --- UserSummary: hide anonymous posts/topics from profile summary ---
 
-  UserSummarySerializer.class_eval do
+  UserSummary.class_eval do
     alias_method :original_top_replies, :top_replies
     def top_replies
       results = original_top_replies
-      return results if scope.is_admin? || scope.user&.id == object.user.id
-      results.reject { |r| AnonymousPostHelper.anon_post_by_id?(r.id) }
+      anon_post_ids = PostCustomField.where(name: "is_anonymous_post", value: "1").pluck(:post_id)
+      results.reject { |r| anon_post_ids.include?(r.id) }
     end
 
     alias_method :original_top_topics, :top_topics
     def top_topics
       results = original_top_topics
-      return results if scope.is_admin? || scope.user&.id == object.user.id
-      results.reject do |t|
-        t.respond_to?(:custom_fields) && t.custom_fields["is_anonymous_topic"].to_i == 1
-      end
+      anon_topic_ids = TopicCustomField.where(name: "is_anonymous_topic", value: "1").pluck(:topic_id)
+      results.reject { |t| anon_topic_ids.include?(t.id) }
     end
   end
 

@@ -184,6 +184,27 @@ after_initialize do
     end
   end
 
+  # --- PostSerializer: anonymize reply-to user for anonymous posts ---
+
+  PostSerializer.class_eval do
+    alias_method :original_reply_to_user, :reply_to_user
+    def reply_to_user
+      result = original_reply_to_user
+      return result if result.nil?
+      return result if AnonymousPostHelper.can_reveal?(scope)
+
+      reply_post_number = object.reply_to_post_number
+      return result unless reply_post_number
+
+      reply_post = Post.find_by(topic_id: object.topic_id, post_number: reply_post_number)
+      if reply_post && AnonymousPostHelper.anon_post_by_id?(reply_post.id) && scope.user&.id != reply_post.user_id
+        AnonymousPostHelper.anonymous_user_hash
+      else
+        result
+      end
+    end
+  end
+
   # --- TopicViewSerializer: topic-level fields ---
 
   add_to_serializer(:topic_view, :is_anonymous_topic) do
@@ -260,6 +281,12 @@ after_initialize do
         end
       end
     end
+  end
+
+  # --- TopicListItemSerializer: is_anonymous_topic flag for topic list ---
+
+  add_to_serializer(:topic_list_item, :is_anonymous_topic) do
+    object.custom_fields["is_anonymous_topic"].to_i
   end
 
   # --- TopicListItemSerializer: posters in topic list ---
@@ -468,13 +495,20 @@ after_initialize do
 
         if guardian && !AnonymousPostHelper.can_reveal?(guardian) && guardian.user&.id != acting_user_id
           result = result.reject do |action|
+            should_hide = false
+
+            # Check if the action's post itself is anonymous
             if action.respond_to?(:post_id) && action.post_id.present?
-              AnonymousPostHelper.anon_post_by_id?(action.post_id)
-            elsif action.respond_to?(:topic_id) && action.topic_id.present?
-              TopicCustomField.exists?(topic_id: action.topic_id, name: "is_anonymous_topic", value: "1")
-            else
-              false
+              should_hide = AnonymousPostHelper.anon_post_by_id?(action.post_id)
             end
+
+            # Check if the action is in an anonymous topic owned by the profile user
+            if !should_hide && action.respond_to?(:topic_id) && action.topic_id.present?
+              should_hide = TopicCustomField.exists?(topic_id: action.topic_id, name: "is_anonymous_topic", value: "1") &&
+                            Topic.where(id: action.topic_id, user_id: acting_user_id).exists?
+            end
+
+            should_hide
           end
         end
 

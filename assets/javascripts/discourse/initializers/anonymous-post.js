@@ -1,4 +1,5 @@
 import { apiInitializer } from "discourse/lib/api";
+import { iconHTML } from "discourse/lib/icon-library";
 import AnonymousPostCheckbox from "../components/anonymous-post-checkbox";
 
 export default apiInitializer("0.4.0", (api) => {
@@ -16,5 +17,18 @@ export default apiInitializer("0.4.0", (api) => {
       return [{ icon: "ghost", className: "anon-post-indicator" }];
     }
     return [];
+  });
+
+  // Ghost icon left of topic title in topic list for anonymous topics
+  api.decorateTopicTitle((topic, node, topicTitleType) => {
+    if (topic.is_anonymous_topic && topicTitleType !== "topic-title") {
+      const parent = node.parentElement;
+      if (parent && !parent.querySelector(".anon-topic-icon")) {
+        const icon = document.createElement("span");
+        icon.className = "anon-topic-icon";
+        icon.innerHTML = iconHTML("ghost");
+        parent.insertBefore(icon, node);
+      }
+    }
   });
 });

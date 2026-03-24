@@ -155,7 +155,11 @@ after_initialize do
     end
   end
 
-  # --- TopicViewSerializer: topic-level user_id ---
+  # --- TopicViewSerializer: topic-level fields ---
+
+  add_to_serializer(:topic_view, :is_anonymous_topic) do
+    object.topic.custom_fields["is_anonymous_topic"].to_i
+  end
 
   add_to_serializer(:topic_view, :user_id) do
     topic = object.topic
@@ -258,7 +262,7 @@ after_initialize do
     return original_posters if anon_user_ids.empty?
 
     original_posters.map do |poster|
-      if poster.user && anon_user_ids.include?(poster.user.id)
+      if poster.user && anon_user_ids.include?(poster.user.id) && scope.user&.id != poster.user.id
         anon_poster = OpenStruct.new(
           user: AnonymousPostHelper.anonymous_user_object,
           description: poster.description,
@@ -271,6 +275,32 @@ after_initialize do
         anon_poster
       else
         poster
+      end
+    end
+  end
+
+  # --- discourse-reactions: anonymize reaction users on anonymous posts ---
+
+  if defined?(DiscourseReactions::ReactionUserSerializer)
+    DiscourseReactions::ReactionUserSerializer.class_eval do
+      alias_method :original_username, :username
+      def username
+        post = @options[:post] || object.try(:post)
+        if post && AnonymousPostHelper.anon_post?(post) && !scope.is_admin?
+          AnonymousPostHelper.anonymous_user&.username || "anonymous"
+        else
+          original_username
+        end
+      end
+
+      alias_method :original_avatar_template, :avatar_template
+      def avatar_template
+        post = @options[:post] || object.try(:post)
+        if post && AnonymousPostHelper.anon_post?(post) && !scope.is_admin?
+          AnonymousPostHelper.anonymous_user&.avatar_template || AnonymousPostHelper::ANON_AVATAR_FALLBACK
+        else
+          original_avatar_template
+        end
       end
     end
   end
@@ -324,6 +354,44 @@ after_initialize do
   end
 
   PostAlerter.prepend(AnonymousPostAlerterExtension)
+
+  # --- discourse-solved: anonymize "accepted solution" notifications ---
+
+  on(:accepted_solution) do |post|
+    if post && AnonymousPostHelper.anon_post_by_id?(post.id)
+      anon = AnonymousPostHelper.anonymous_user
+      # Fix notifications created in the last minute for this post
+      Notification.where(
+        topic_id: post.topic_id,
+        post_number: post.post_number,
+      ).where("created_at > ?", 1.minute.ago).each do |n|
+        data = JSON.parse(n.data)
+        data["display_username"] = anon&.username || "anonymous"
+        data["username"] = anon&.username || "anonymous"
+        n.update(data: data.to_json)
+      end
+    end
+  end
+
+  # --- UserSummarySerializer: hide anonymous posts from profile summary ---
+
+  UserSummarySerializer.class_eval do
+    alias_method :original_top_replies, :top_replies
+    def top_replies
+      results = original_top_replies
+      return results if scope.is_admin? || scope.user&.id == object.user.id
+      results.reject { |r| AnonymousPostHelper.anon_post_by_id?(r.id) }
+    end
+
+    alias_method :original_top_topics, :top_topics
+    def top_topics
+      results = original_top_topics
+      return results if scope.is_admin? || scope.user&.id == object.user.id
+      results.reject do |t|
+        t.respond_to?(:custom_fields) && t.custom_fields["is_anonymous_topic"].to_i == 1
+      end
+    end
+  end
 
   # --- UserAction: hide anonymous posts from other users' activity ---
   # Filter at the stream level by patching UserAction.stream

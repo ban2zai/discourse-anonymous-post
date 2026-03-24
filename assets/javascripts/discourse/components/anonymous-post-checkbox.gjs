@@ -8,8 +8,10 @@ import { i18n } from "discourse-i18n";
 
 export default class AnonymousPostCheckbox extends Component {
   @service siteSettings;
+  @service currentUser;
 
   @tracked checked = false;
+  _initialized = false;
 
   get shouldRender() {
     if (!this.siteSettings.anonymous_post_enabled) {
@@ -21,8 +23,24 @@ export default class AnonymousPostCheckbox extends Component {
       return false;
     }
 
-    const action = model.action;
-    return action === "reply" || action === "createTopic";
+    const modelAction = model.action;
+    const result = modelAction === "reply" || modelAction === "createTopic";
+
+    // Auto-check when replying in own anonymous topic
+    if (result && modelAction === "reply" && !this._initialized) {
+      const topic = model.topic;
+      if (
+        topic?.is_anonymous_topic &&
+        this.currentUser &&
+        topic.user_id === this.currentUser.id
+      ) {
+        this._initialized = true;
+        this.checked = true;
+        model.set("is_anonymous_post", 1);
+      }
+    }
+
+    return result;
   }
 
   @action

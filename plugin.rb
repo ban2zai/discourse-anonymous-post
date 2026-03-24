@@ -375,21 +375,33 @@ after_initialize do
 
   # --- UserSummary: hide anonymous posts/topics from profile summary ---
 
-  UserSummary.class_eval do
-    alias_method :original_top_replies, :top_replies
+  module ::AnonymousUserSummaryExtension
     def top_replies
-      results = original_top_replies
+      results = super
       anon_post_ids = PostCustomField.where(name: "is_anonymous_post", value: "1").pluck(:post_id)
       results.reject { |r| anon_post_ids.include?(r.id) }
     end
 
-    alias_method :original_top_topics, :top_topics
     def top_topics
-      results = original_top_topics
+      results = super
+      anon_topic_ids = TopicCustomField.where(name: "is_anonymous_topic", value: "1").pluck(:topic_id)
+      results.reject { |t| anon_topic_ids.include?(t.id) }
+    end
+
+    def replies
+      results = super
+      anon_post_ids = PostCustomField.where(name: "is_anonymous_post", value: "1").pluck(:post_id)
+      results.reject { |r| anon_post_ids.include?(r.id) }
+    end
+
+    def topics
+      results = super
       anon_topic_ids = TopicCustomField.where(name: "is_anonymous_topic", value: "1").pluck(:topic_id)
       results.reject { |t| anon_topic_ids.include?(t.id) }
     end
   end
+
+  UserSummary.prepend(AnonymousUserSummaryExtension)
 
   # --- UserAction: hide anonymous posts from other users' activity ---
   # Filter at the stream level by patching UserAction.stream

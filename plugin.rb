@@ -414,7 +414,7 @@ after_initialize do
     end
   end
 
-  # --- PostAlerter: anonymize notifications for anonymous posts ---
+  # --- PostAlerter:  anonymize notifications for anonymous posts ---
 
   module ::AnonymousPostAlerterExtension
     def create_notification(user, notification_type, post, opts = {})
@@ -451,38 +451,37 @@ after_initialize do
   end
 
   # --- discourse-solved: anonymize "Solved by" display ---
-  # Override at serializer level to avoid load-order issues with Topic.prepend.
-  # Ruby MRO checks prepended modules before the class's own methods, so our
-  # prepend runs first even if discourse-solved defines accepted_answer via
-  # add_to_serializer (which uses define_method on the class).
+  # discourse-solved prepends TopicViewSerializerExtension which defines
+  # accepted_answer without calling super, so we can't intercept it directly.
+  # Instead, we wrap as_json to post-process the serialized output.
 
-  module ::AnonymousSolvedSerializerExtension
-    def accepted_answer
+  module ::AnonymousSolvedJsonExtension
+    def as_json(*)
       result = super
-      return result unless result.is_a?(Hash)
+      aa = result[:accepted_answer]
+      return result unless aa.is_a?(Hash)
       return result if AnonymousPostHelper.can_reveal?(scope)
 
       topic = object.topic
       return result unless AnonymousPostHelper.anon_topic?(topic)
 
       # Anonymize solver if their answer post is anonymous
-      if result[:username].present?
+      if aa[:username].present?
         answer_post = topic.solved&.answer_post rescue nil
         if answer_post && AnonymousPostHelper.anon_post_by_id?(answer_post.id)
           anon = AnonymousPostHelper.anonymous_user_hash
-          result = result.dup
-          result[:username] = anon[:username]
-          result[:name] = anon[:name]
+          aa[:username] = anon[:username]
+          aa[:name] = anon[:name]
         end
       end
 
       # Anonymize accepter if they are the topic owner
-      if result[:accepter_username].present?
+      if aa[:accepter_username].present?
         accepter = topic.solved&.accepter rescue nil
         if accepter&.id == topic.user_id
           anon = AnonymousPostHelper.anonymous_user_hash
-          result[:accepter_username] = anon[:username]
-          result[:accepter_name] = anon[:name]
+          aa[:accepter_username] = anon[:username]
+          aa[:accepter_name] = anon[:name]
         end
       end
 
@@ -490,7 +489,7 @@ after_initialize do
     end
   end
 
-  TopicViewSerializer.prepend(AnonymousSolvedSerializerExtension)
+  TopicViewSerializer.prepend(AnonymousSolvedJsonExtension)
 
   # --- UserSummary: hide anonymous posts/topics from profile summary ---
 

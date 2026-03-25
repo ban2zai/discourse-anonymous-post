@@ -683,7 +683,8 @@ after_initialize do
       valid_ids =
         UserAction
           .where(action_type: UserAction::REPLY, user_id: @user.id)
-          .where.not(topic_id: anon_ids.to_a)
+          .joins("INNER JOIN posts ON posts.id = user_actions.target_post_id")
+          .where.not("posts.topic_id" => anon_ids.to_a)
           .pluck(:target_user_id)
           .compact
           .to_set
@@ -704,7 +705,8 @@ after_initialize do
       valid_ids =
         UserAction
           .where(action_type: UserAction::WAS_LIKED, user_id: @user.id)
-          .where.not(topic_id: anon_ids.to_a)
+          .joins("INNER JOIN posts ON posts.id = user_actions.target_post_id")
+          .where.not("posts.topic_id" => anon_ids.to_a)
           .pluck(:acting_user_id)
           .compact
           .to_set
@@ -729,12 +731,21 @@ after_initialize do
       non_anon_category_ids =
         UserAction
           .where(user_id: @user.id, action_type: [UserAction::NEW_TOPIC, UserAction::REPLY])
-          .joins("INNER JOIN topics ON topics.id = user_actions.topic_id")
-          .where.not(topic_id: anon_ids.to_a)
+          .joins("INNER JOIN posts ON posts.id = user_actions.target_post_id")
+          .where.not("posts.topic_id" => anon_ids.to_a)
+          .joins("INNER JOIN topics ON topics.id = posts.topic_id")
           .pluck("topics.category_id")
           .compact
           .to_set
-      results.select { |c| non_anon_category_ids.include?(c.category_id) }
+      results.select do |c|
+        cat_id =
+          if c.respond_to?(:category_id)
+            c.category_id
+          elsif c.respond_to?(:category) && c.category.respond_to?(:id)
+            c.category.id
+          end
+        non_anon_category_ids.include?(cat_id)
+      end
     rescue => e
       Rails.logger.warn("[AnonymousPost] categories filter error: #{e.message}")
       super

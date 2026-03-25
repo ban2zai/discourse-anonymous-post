@@ -621,14 +621,14 @@ after_initialize do
   Search.class_eval do
     alias_method :original_execute, :execute
     def execute(readonly_mode: Discourse.readonly_mode?)
-      original_term = @term.to_s.dup
       results = original_execute(readonly_mode: readonly_mode)
       return results if !SiteSetting.anonymous_post_enabled
 
       # Detect user-scoped search: either via search_context or @username in search term
+      # @clean_term is the raw unprocessed search input (set in initialize before prepare_data)
       # The @username advanced_filter adds posts.where("posts.user_id = ?") directly
       # without setting @search_context, so we must check both cases
-      has_user_filter = @search_context.is_a?(User) || original_term.match?(/@\S+/)
+      has_user_filter = @search_context.is_a?(User) || @clean_term.to_s.match?(/@\S+/)
 
       if has_user_filter && results&.posts.present?
         guardian = @guardian || Guardian.new

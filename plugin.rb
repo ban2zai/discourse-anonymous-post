@@ -624,36 +624,40 @@ after_initialize do
       results = original_execute(readonly_mode: readonly_mode)
       return results if !SiteSetting.anonymous_post_enabled
 
-      # Detect user-scoped search: either via search_context or @username in search term
-      # @clean_term is the raw unprocessed search input (set in initialize before prepare_data)
-      # The @username advanced_filter adds posts.where("posts.user_id = ?") directly
-      # without setting @search_context, so we must check both cases
-      has_user_filter = @search_context.is_a?(User) || @clean_term.to_s.match?(/@\S+/)
+      begin
+        # Detect user-scoped search: either via search_context or @username in search term
+        # @clean_term is the raw unprocessed search input (set in initialize before prepare_data)
+        # The @username advanced_filter adds posts.where("posts.user_id = ?") directly
+        # without setting @search_context, so we must check both cases
+        has_user_filter = @search_context.is_a?(User) || @clean_term.to_s.match?(/@\S+/)
 
-      if has_user_filter && results&.posts.present?
-        guardian = @guardian || Guardian.new
-        unless AnonymousPostHelper.can_reveal?(guardian)
-          post_ids = results.posts.map(&:id)
-          topic_ids = results.posts.map(&:topic_id).uniq
+        if has_user_filter && results&.posts.present?
+          guardian = @guardian || Guardian.new
+          unless AnonymousPostHelper.can_reveal?(guardian)
+            post_ids = results.posts.map(&:id)
+            topic_ids = results.posts.map(&:topic_id).uniq
 
-          # Posts explicitly marked as anonymous
-          anon_post_ids = PostCustomField.where(
-            name: "is_anonymous_post",
-            value: "1",
-            post_id: post_ids
-          ).pluck(:post_id).to_set
+            # Posts explicitly marked as anonymous
+            anon_post_ids = PostCustomField.where(
+              name: "is_anonymous_post",
+              value: "1",
+              post_id: post_ids
+            ).pluck(:post_id).to_set
 
-          # Topics marked as anonymous
-          anon_topic_ids = TopicCustomField.where(
-            name: "is_anonymous_topic",
-            value: "1",
-            topic_id: topic_ids
-          ).pluck(:topic_id).to_set
+            # Topics marked as anonymous
+            anon_topic_ids = TopicCustomField.where(
+              name: "is_anonymous_topic",
+              value: "1",
+              topic_id: topic_ids
+            ).pluck(:topic_id).to_set
 
-          results.posts = results.posts.reject do |p|
-            anon_post_ids.include?(p.id) || anon_topic_ids.include?(p.topic_id)
+            results.posts = results.posts.reject do |p|
+              anon_post_ids.include?(p.id) || anon_topic_ids.include?(p.topic_id)
+            end
           end
         end
+      rescue => e
+        Rails.logger.error("AnonymousPost search filter error: #{e.class}: #{e.message}\n#{e.backtrace.first(5).join("\n")}")
       end
 
       results

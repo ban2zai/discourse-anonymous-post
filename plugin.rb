@@ -635,8 +635,11 @@ after_initialize do
     def top_replies
       results = super
       return results if !SiteSetting.anonymous_post_enabled
-      anon_post_ids = PostCustomField.where(name: "is_anonymous_post", value: "1").pluck(:post_id)
-      results.reject { |r| anon_post_ids.include?(r.id) }
+      return results if @guardian && AnonymousPostHelper.can_reveal?(@guardian)
+      return results if @guardian&.user&.id == @user.id
+      anon_ids = AnonymousPostHelper.anon_topic_ids_for_user(@user.id)
+      anon_post_ids = PostCustomField.where(name: "is_anonymous_post", value: "1").pluck(:post_id).to_set
+      results.reject { |r| anon_post_ids.include?(r.id) || anon_ids.include?(r.topic_id) }
     end
 
     def top_topics
@@ -650,8 +653,11 @@ after_initialize do
     def replies
       results = super
       return results if !SiteSetting.anonymous_post_enabled
-      anon_post_ids = PostCustomField.where(name: "is_anonymous_post", value: "1").pluck(:post_id)
-      results.reject { |r| anon_post_ids.include?(r.id) }
+      return results if @guardian && AnonymousPostHelper.can_reveal?(@guardian)
+      return results if @guardian&.user&.id == @user.id
+      anon_ids = AnonymousPostHelper.anon_topic_ids_for_user(@user.id)
+      anon_post_ids = PostCustomField.where(name: "is_anonymous_post", value: "1").pluck(:post_id).to_set
+      results.reject { |r| anon_post_ids.include?(r.id) || anon_ids.include?(r.topic_id) }
     end
 
     def topics
@@ -856,7 +862,22 @@ after_initialize do
 
         if has_user_filter && results&.posts.present?
           guardian = @guardian || Guardian.new
-          unless AnonymousPostHelper.can_reveal?(guardian)
+
+          # Determine the user being searched to scope topic-level hiding.
+          # Only hide anonymous topics where THIS specific user was the anonymous author.
+          # Other users' posts in that topic remain visible (they were NOT anonymous).
+          searched_user =
+            if @search_context.is_a?(User)
+              @search_context
+            else
+              username = @clean_term.to_s.match(/@(\S+)/)&.[](1)
+              username ? User.find_by(username: username) : nil
+            end
+
+          # Authors always see their own anonymous posts; reveal_groups members see all
+          is_own_search = searched_user && guardian.user&.id == searched_user.id
+
+          unless AnonymousPostHelper.can_reveal?(guardian) || is_own_search
             post_ids = results.posts.map(&:id)
 
             # Posts explicitly marked as anonymous — always hide
@@ -865,17 +886,6 @@ after_initialize do
               value: "1",
               post_id: post_ids
             ).pluck(:post_id).to_set
-
-            # Determine the user being searched to scope topic-level hiding.
-            # Only hide anonymous topics where THIS specific user was the anonymous author.
-            # Other users' posts in that topic remain visible (they were NOT anonymous).
-            searched_user =
-              if @search_context.is_a?(User)
-                @search_context
-              else
-                username = @clean_term.to_s.match(/@(\S+)/)&.[](1)
-                username ? User.find_by(username: username) : nil
-              end
 
             anon_topic_ids_for_searched =
               if searched_user

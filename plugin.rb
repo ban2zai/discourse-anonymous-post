@@ -651,7 +651,7 @@ after_initialize do
               topic_id: topic_ids
             ).pluck(:topic_id).to_set
 
-            results.posts = results.posts.reject do |p|
+            results.posts.reject! do |p|
               anon_post_ids.include?(p.id) || anon_topic_ids.include?(p.topic_id)
             end
           end

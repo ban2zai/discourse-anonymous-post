@@ -454,16 +454,19 @@ after_initialize do
   # --- discourse-solved: anonymize "accepted solution" notifications ---
 
   on(:accepted_solution) do |post|
-    if post && AnonymousPostHelper.anon_post_by_id?(post.id)
+    topic = post&.topic
+    if topic && AnonymousPostHelper.anon_topic?(topic)
       anon = AnonymousPostHelper.anonymous_user
       Notification.where(
-        topic_id: post.topic_id,
+        topic_id: topic.id,
         post_number: post.post_number,
       ).where("created_at > ?", 1.minute.ago).each do |n|
         data = JSON.parse(n.data)
-        data["display_username"] = anon&.username || AnonymousPostHelper.anon_username
-        data["username"] = anon&.username || AnonymousPostHelper.anon_username
-        n.update(data: data.to_json)
+        if data["display_username"].present?
+          data["display_username"] = anon&.username || AnonymousPostHelper.anon_username
+          data["username"] = anon&.username || AnonymousPostHelper.anon_username
+          n.update(data: data.to_json)
+        end
       end
     end
   end
@@ -592,6 +595,66 @@ after_initialize do
   end
 
   TopicQuery.prepend(AnonymousTopicQueryExtension)
+
+  # --- Search: exclude anonymous posts from @username searches ---
+
+  Search.class_eval do
+    alias_method :original_execute, :execute
+    def execute(readonly_mode: Discourse.readonly_mode?)
+      results = original_execute(readonly_mode: readonly_mode)
+
+      # When searching in user context (@username), hide anonymous posts
+      if @search_context.is_a?(User) && results&.posts.present?
+        guardian = @guardian || Guardian.new
+        unless AnonymousPostHelper.can_reveal?(guardian)
+          anon_ids = PostCustomField.where(
+            name: "is_anonymous_post",
+            value: "1",
+            post_id: results.posts.map(&:id)
+          ).pluck(:post_id).to_set
+
+          results.posts = results.posts.reject { |p| anon_ids.include?(p.id) }
+        end
+      end
+
+      results
+    end
+  end
+
+  # --- Flag PM: redirect "send message" for anonymous posts to moderators ---
+
+  register_post_action_notify_user_handler do |user, post, message|
+    if post && AnonymousPostHelper.anon_post_by_id?(post.id) &&
+       !AnonymousPostHelper.can_reveal?(Guardian.new(user))
+
+      # Create PM to moderators instead of to real author
+      title = I18n.t(
+        "post_action_types.notify_user.email_title",
+        title: post.topic.title,
+        locale: SiteSetting.default_locale,
+        default: I18n.t("post_action_types.illegal.email_title"),
+      )
+
+      body = I18n.t(
+        "post_action_types.notify_user.email_body",
+        message: message,
+        link: "#{Discourse.base_url}#{post.url}",
+        locale: SiteSetting.default_locale,
+        default: I18n.t("post_action_types.illegal.email_body"),
+      )
+
+      PostCreator.create!(
+        user,
+        archetype: Archetype.private_message,
+        subtype: TopicSubtype.notify_moderators,
+        title: title.truncate(SiteSetting.max_topic_title_length, separator: /\s/),
+        raw: body,
+        target_group_names: [Group[:moderators].name],
+      )
+
+      false  # Prevent default PM to real author
+    end
+  end
 
   # --- discourse-solved: hide anonymous solved posts from "Решённые" tab ---
 

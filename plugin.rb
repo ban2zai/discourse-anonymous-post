@@ -621,11 +621,16 @@ after_initialize do
   Search.class_eval do
     alias_method :original_execute, :execute
     def execute(readonly_mode: Discourse.readonly_mode?)
+      original_term = @term.to_s.dup
       results = original_execute(readonly_mode: readonly_mode)
       return results if !SiteSetting.anonymous_post_enabled
 
-      # When searching in user context (@username), hide anonymous posts and topics
-      if @search_context.is_a?(User) && results&.posts.present?
+      # Detect user-scoped search: either via search_context or @username in search term
+      # The @username advanced_filter adds posts.where("posts.user_id = ?") directly
+      # without setting @search_context, so we must check both cases
+      has_user_filter = @search_context.is_a?(User) || original_term.match?(/@\S+/)
+
+      if has_user_filter && results&.posts.present?
         guardian = @guardian || Guardian.new
         unless AnonymousPostHelper.can_reveal?(guardian)
           post_ids = results.posts.map(&:id)
@@ -652,6 +657,21 @@ after_initialize do
       end
 
       results
+    end
+  end
+
+  # --- UserCardSerializer: hide message button for anonymous user ---
+  # UserSerializer inherits from UserCardSerializer, so this covers both
+  # user card popup and full profile page
+
+  UserCardSerializer.class_eval do
+    alias_method :original_can_send_private_message_to_user, :can_send_private_message_to_user
+    def can_send_private_message_to_user
+      if SiteSetting.anonymous_post_enabled
+        anon = AnonymousPostHelper.anonymous_user
+        return false if anon && object.id == anon.id
+      end
+      original_can_send_private_message_to_user
     end
   end
 

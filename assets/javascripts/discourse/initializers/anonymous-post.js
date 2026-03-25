@@ -35,7 +35,8 @@ export default apiInitializer("0.4.0", (api) => {
     return value;
   });
 
-  api.onPageChange(() => {
+  api.onPageChange((url) => {
+    // Ghost icon for anonymous topics in topic list
     document.querySelectorAll("tr.is-anonymous-topic").forEach((row) => {
       if (row.querySelector(".anon-topic-icon")) return;
       const titleLink = row.querySelector(".link-top-line a.title");
@@ -47,5 +48,13 @@ export default apiInitializer("0.4.0", (api) => {
         titleLink.parentElement.insertBefore(icon, titleLink);
       }
     });
+
+    // Hide profile sections for anonymous user
+    const anonUsername = siteSettings.anonymous_post_user;
+    if (anonUsername && url.match(new RegExp(`/u/${anonUsername}(/|$)`))) {
+      document.body.classList.add("viewing-anon-profile");
+    } else {
+      document.body.classList.remove("viewing-anon-profile");
+    }
   });
 });

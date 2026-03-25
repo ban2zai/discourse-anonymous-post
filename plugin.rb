@@ -623,7 +623,7 @@ after_initialize do
 
   # --- Flag PM: redirect "send message" for anonymous posts to moderators ---
 
-  register_post_action_notify_user_handler do |user, post, message|
+  register_post_action_notify_user_handler(Proc.new { |user, post, message|
     if post && AnonymousPostHelper.anon_post_by_id?(post.id) &&
        !AnonymousPostHelper.can_reveal?(Guardian.new(user))
 
@@ -654,7 +654,7 @@ after_initialize do
 
       false  # Prevent default PM to real author
     end
-  end
+  })
 
   # --- discourse-solved: hide anonymous solved posts from "Решённые" tab ---
 

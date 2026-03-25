@@ -103,6 +103,15 @@ after_initialize do
       scope.user.groups.where(id: group_ids).exists?
     end
 
+    # Check if a user has any anonymous posts in a given topic
+    def self.user_has_anon_posts_in_topic?(user_id, topic_id)
+      PostCustomField
+        .joins(:post)
+        .where(name: "is_anonymous_post", value: "1")
+        .where(posts: { topic_id: topic_id, user_id: user_id })
+        .exists?
+    end
+
     # Check if category allows anonymous posting
     def self.category_allowed?(category_id)
       cat_ids = SiteSetting.anonymous_post_allowed_categories.to_s.split("|").map(&:to_i)
@@ -389,6 +398,8 @@ after_initialize do
     UserReactionSerializer.class_eval do
       alias_method :original_user, :user
       def user
+        return original_user if !SiteSetting.anonymous_post_enabled
+
         reaction_user = object.user
         post = object.post
         return reaction_user unless post
@@ -396,17 +407,24 @@ after_initialize do
         topic = post.topic
         return reaction_user unless topic
         return reaction_user if AnonymousPostHelper.can_reveal?(scope)
+        return reaction_user if scope.user&.id == reaction_user&.id
 
-        # Anonymize if the reacting user is the topic owner in an anonymous topic
-        if AnonymousPostHelper.anon_topic?(topic) && reaction_user&.id == topic.user_id &&
-           scope.user&.id != reaction_user&.id
-          AnonymousPostHelper.anonymous_user_object
-        elsif AnonymousPostHelper.anon_post_by_id?(post.id) && reaction_user&.id == post.user_id &&
-              scope.user&.id != reaction_user&.id
-          AnonymousPostHelper.anonymous_user_object
-        else
-          reaction_user
+        # Case 1: Anonymous topic — anonymize topic owner's reactions on ANY post
+        if AnonymousPostHelper.anon_topic?(topic) && reaction_user&.id == topic.user_id
+          return AnonymousPostHelper.anonymous_user_object
         end
+
+        # Case 2: Post is anonymous and reacting user is its author (fast path)
+        if AnonymousPostHelper.anon_post_by_id?(post.id) && reaction_user&.id == post.user_id
+          return AnonymousPostHelper.anonymous_user_object
+        end
+
+        # Case 3: Reacting user has anonymous post(s) in this topic — hide their reactions everywhere in the topic
+        if reaction_user&.id && AnonymousPostHelper.user_has_anon_posts_in_topic?(reaction_user.id, topic.id)
+          return AnonymousPostHelper.anonymous_user_object
+        end
+
+        reaction_user
       end
     end
   end

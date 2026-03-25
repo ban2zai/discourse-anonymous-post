@@ -112,6 +112,16 @@ after_initialize do
         .exists?
     end
 
+    # Returns the set of topic_ids where the given user is the anonymous topic creator
+    def self.anon_topic_ids_for_user(user_id)
+      TopicCustomField
+        .where(name: "is_anonymous_topic", value: "1")
+        .joins("INNER JOIN topics ON topics.id = topic_custom_fields.topic_id")
+        .where(topics: { user_id: user_id })
+        .pluck(:topic_id)
+        .to_set
+    end
+
     # Shared logic: should a reaction/like user be anonymized?
     def self.should_anonymize_reaction_user?(user, topic, post, current_user)
       return false if current_user&.id == user&.id
@@ -632,8 +642,9 @@ after_initialize do
     def top_topics
       results = super
       return results if !SiteSetting.anonymous_post_enabled
-      anon_topic_ids = TopicCustomField.where(name: "is_anonymous_topic", value: "1").pluck(:topic_id)
-      results.reject { |t| anon_topic_ids.include?(t.id) }
+      anon_ids = AnonymousPostHelper.anon_topic_ids_for_user(@user.id)
+      return results if anon_ids.empty?
+      results.reject { |t| anon_ids.include?(t.id) }
     end
 
     def replies
@@ -646,8 +657,87 @@ after_initialize do
     def topics
       results = super
       return results if !SiteSetting.anonymous_post_enabled
-      anon_topic_ids = TopicCustomField.where(name: "is_anonymous_topic", value: "1").pluck(:topic_id)
-      results.reject { |t| anon_topic_ids.include?(t.id) }
+      anon_ids = AnonymousPostHelper.anon_topic_ids_for_user(@user.id)
+      return results if anon_ids.empty?
+      results.reject { |t| anon_ids.include?(t.id) }
+    end
+
+    # Issue 1: hide links posted while anonymous
+    def links
+      results = super
+      return results if !SiteSetting.anonymous_post_enabled
+      return results if @guardian && AnonymousPostHelper.can_reveal?(@guardian)
+      anon_ids = AnonymousPostHelper.anon_topic_ids_for_user(@user.id)
+      return results if anon_ids.empty?
+      results.reject { |l| anon_ids.include?(l.topic_id) }
+    end
+
+    # Issue 2: hide "most active respondents" from anonymous topics
+    def most_replied_to_users
+      results = super
+      return results if !SiteSetting.anonymous_post_enabled
+      return results if @guardian && AnonymousPostHelper.can_reveal?(@guardian)
+      anon_ids = AnonymousPostHelper.anon_topic_ids_for_user(@user.id)
+      return results if anon_ids.empty?
+      # Find users this user replied to in NON-anonymous topics
+      valid_ids =
+        UserAction
+          .where(action_type: UserAction::REPLY, user_id: @user.id)
+          .where.not(topic_id: anon_ids.to_a)
+          .pluck(:target_user_id)
+          .compact
+          .to_set
+      results.select { |u| valid_ids.include?(u.id) }
+    rescue => e
+      Rails.logger.warn("[AnonymousPost] most_replied_to_users filter error: #{e.message}")
+      super
+    end
+
+    # Issue 2: hide "fans / most liked by" from anonymous topics
+    def most_liked_by_users
+      results = super
+      return results if !SiteSetting.anonymous_post_enabled
+      return results if @guardian && AnonymousPostHelper.can_reveal?(@guardian)
+      anon_ids = AnonymousPostHelper.anon_topic_ids_for_user(@user.id)
+      return results if anon_ids.empty?
+      # Find users who liked this user's posts in NON-anonymous topics
+      valid_ids =
+        UserAction
+          .where(action_type: UserAction::WAS_LIKED, user_id: @user.id)
+          .where.not(topic_id: anon_ids.to_a)
+          .pluck(:acting_user_id)
+          .compact
+          .to_set
+      results.select { |u| valid_ids.include?(u.id) }
+    rescue => e
+      Rails.logger.warn("[AnonymousPost] most_liked_by_users filter error: #{e.message}")
+      super
+    end
+
+    # Issue 3: exclude anonymous topics from "top categories" stats
+    def categories
+      results = super
+      return results if !SiteSetting.anonymous_post_enabled
+      return results if @guardian && AnonymousPostHelper.can_reveal?(@guardian)
+      anon_ids = AnonymousPostHelper.anon_topic_ids_for_user(@user.id)
+      return results if anon_ids.empty?
+      # Each element has topic_count/posts_count — recompute per category excluding anon topics
+      # We can't easily adjust counts from super, so filter out categories whose ALL topics
+      # are anonymous. For partial overlap, the counts remain (best-effort).
+      # The more complete fix would require a full requery — see comment below.
+      # For now: remove category entries that have ZERO non-anon activity
+      non_anon_category_ids =
+        UserAction
+          .where(user_id: @user.id, action_type: [UserAction::NEW_TOPIC, UserAction::REPLY])
+          .joins("INNER JOIN topics ON topics.id = user_actions.topic_id")
+          .where.not(topic_id: anon_ids.to_a)
+          .pluck("topics.category_id")
+          .compact
+          .to_set
+      results.select { |c| non_anon_category_ids.include?(c.category_id) }
+    rescue => e
+      Rails.logger.warn("[AnonymousPost] categories filter error: #{e.message}")
+      super
     end
   end
 
@@ -727,24 +817,34 @@ after_initialize do
           guardian = @guardian || Guardian.new
           unless AnonymousPostHelper.can_reveal?(guardian)
             post_ids = results.posts.map(&:id)
-            topic_ids = results.posts.map(&:topic_id).uniq
 
-            # Posts explicitly marked as anonymous
+            # Posts explicitly marked as anonymous — always hide
             anon_post_ids = PostCustomField.where(
               name: "is_anonymous_post",
               value: "1",
               post_id: post_ids
             ).pluck(:post_id).to_set
 
-            # Topics marked as anonymous
-            anon_topic_ids = TopicCustomField.where(
-              name: "is_anonymous_topic",
-              value: "1",
-              topic_id: topic_ids
-            ).pluck(:topic_id).to_set
+            # Determine the user being searched to scope topic-level hiding.
+            # Only hide anonymous topics where THIS specific user was the anonymous author.
+            # Other users' posts in that topic remain visible (they were NOT anonymous).
+            searched_user =
+              if @search_context.is_a?(User)
+                @search_context
+              else
+                username = @clean_term.to_s.match(/@(\S+)/)&.[](1)
+                username ? User.find_by(username: username) : nil
+              end
+
+            anon_topic_ids_for_searched =
+              if searched_user
+                AnonymousPostHelper.anon_topic_ids_for_user(searched_user.id)
+              else
+                Set.new
+              end
 
             results.posts.reject! do |p|
-              anon_post_ids.include?(p.id) || anon_topic_ids.include?(p.topic_id)
+              anon_post_ids.include?(p.id) || anon_topic_ids_for_searched.include?(p.topic_id)
             end
           end
         end
